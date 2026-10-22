@@ -7,3 +7,4 @@ venv/
 # Capturas (no subas tráfico real al repo)
 *.pcap
 *.pcapng
+grafico_*.png

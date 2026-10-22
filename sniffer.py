@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Sniffer de paquetes - v4 (guardar y graficar)
+Sniffer de paquetes - v5 (vigilar)
 
-Captura el trafico de TU red unos segundos, muestra un resumen y ademas:
-  - guarda la captura en un archivo .pcap (se abre con Wireshark)
-  - genera un grafico .png con el reparto por protocolo y los top servers
+Captura el trafico de TU red, lo analiza, lo guarda y grafica, y ademas
+avisa de dos cosas de seguridad:
+  - trafico SIN CIFRAR (HTTP, FTP, Telnet...): quien te ve pasa en claro
+  - posibles ESCANEOS de puertos: una IP tocando muchos puertos distintos
 
 USO ETICO: corré esto SOLO en tu propia red / tu propia maquina.
 Capturar trafico de redes ajenas es ilegal.
@@ -15,12 +16,10 @@ Necesita permisos de administrador:
 
 import os
 import socket
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime
 
-# matplotlib en modo "Agg": genera imagenes a archivo sin necesitar pantalla
-# (importante porque corremos con sudo, donde puede no haber display).
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl")   # evita warnings corriendo como root
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl")
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -30,8 +29,10 @@ from scapy.all import sniff, wrpcap, IP, TCP, UDP, ICMP
 socket.setdefaulttimeout(1)
 
 # --- Config: editá estos valores ---
-SEGUNDOS = 15        # cuanto tiempo capturar. Cortás antes con Ctrl+C
-INTERFAZ = None      # None = la placa por defecto. Ejemplos: "wlan0", "eth0"
+SEGUNDOS = 15            # cuanto tiempo capturar. Cortás antes con Ctrl+C
+INTERFAZ = None          # None = la placa por defecto. Ejemplos: "wlan0", "eth0"
+FILTRO = None            # None = todo. Ejemplos: "tcp", "udp", "port 53", "not port 443"
+PUERTOS_ESCANEO = 15     # cuantos puertos distintos entre dos IPs = sospechoso
 # ------------------------------------
 
 SERVICIOS = {
@@ -41,6 +42,16 @@ SERVICIOS = {
     995: "POP3S", 3389: "RDP", 8080: "HTTP-alt",
 }
 
+# Servicios que viajan SIN cifrar. Su version cifrada esta al lado.
+INSEGUROS = {
+    "HTTP": "usá HTTPS",
+    "FTP": "usá SFTP/FTPS",
+    "Telnet": "usá SSH",
+    "POP3": "usá POP3S",
+    "IMAP": "usá IMAPS",
+    "SMTP": "usá SMTPS",
+}
+
 # --- Acumuladores ---
 total = 0
 por_protocolo = Counter()
@@ -48,6 +59,8 @@ ips_privadas = Counter()
 ips_publicas = Counter()
 servicios_usados = Counter()
 conexiones = set()
+sin_cifrar = Counter()                  # (ip_server, servicio) -> paquetes
+puertos_por_par = defaultdict(set)      # (origen, destino) -> set de puertos tocados
 
 
 def es_privada(ip):
@@ -100,15 +113,28 @@ def procesar(paquete):
     elif paquete.haslayer(UDP):
         sport, dport = paquete[UDP].sport, paquete[UDP].dport
 
-    if sport is not None:
-        servicio = puerto_de_servicio(sport, dport)
-        if servicio is not None:
-            servicios_usados[servicio] += 1
-        conexiones.add(frozenset({(origen, sport), (destino, dport)}))
+    if sport is None:
+        return
+
+    # Para detectar escaneos: anotamos que puertos toca cada par de IPs.
+    # Un escaneo = una IP golpeando MUCHOS puertos distintos de otra.
+    puertos_por_par[(origen, destino)].add(dport)
+
+    servicio = puerto_de_servicio(sport, dport)
+    if servicio is None:
+        return
+
+    servicios_usados[servicio] += 1
+    conexiones.add(frozenset({(origen, sport), (destino, dport)}))
+
+    # El server es la punta que tiene el puerto de servicio
+    server_ip = destino if servicio == dport else origen
+    nombre = SERVICIOS.get(servicio)
+    if nombre in INSEGUROS:
+        sin_cifrar[(server_ip, nombre)] += 1
 
 
 def resolver(ip):
-    """Reverse DNS: nombre de una IP, o la IP si no tiene."""
     try:
         return socket.gethostbyaddr(ip)[0]
     except Exception:
@@ -116,15 +142,20 @@ def resolver(ip):
 
 
 def top_publicas_resueltas(n=5):
-    """Top servers de internet, cada uno ya con su nombre resuelto."""
     return [(ip, resolver(ip), cuenta) for ip, cuenta in ips_publicas.most_common(n)]
 
 
+def detectar_escaneos():
+    """Pares de IPs donde una toco demasiados puertos distintos de la otra."""
+    sospechosos = []
+    for (origen, destino), puertos in puertos_por_par.items():
+        if len(puertos) >= PUERTOS_ESCANEO:
+            sospechosos.append((origen, destino, len(puertos)))
+    sospechosos.sort(key=lambda x: x[2], reverse=True)
+    return sospechosos
+
+
 def devolver_al_usuario(path):
-    """
-    Corremos con sudo, asi que los archivos quedan a nombre de root y despues
-    no los podés borrar sin sudo. Se los devolvemos a tu usuario.
-    """
     uid, gid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
     if uid and gid:
         os.chown(path, int(uid), int(gid))
@@ -144,26 +175,14 @@ def acortar(texto, largo=22):
 def hacer_grafico(top_pub):
     if total == 0:
         return None
-
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
-    # Panel 1: torta de protocolos
-    ax1.pie(
-        list(por_protocolo.values()),
-        labels=list(por_protocolo.keys()),
-        autopct="%1.0f%%",
-        startangle=90,
-    )
+    ax1.pie(list(por_protocolo.values()), labels=list(por_protocolo.keys()),
+            autopct="%1.0f%%", startangle=90)
     ax1.set_title("Paquetes por protocolo")
-
-    # Panel 2: barras de top servers
-    etiquetas = [acortar(nombre) for _, nombre, _ in top_pub]
-    cuentas = [cuenta for _, _, cuenta in top_pub]
-    ax2.barh(etiquetas, cuentas)
-    ax2.invert_yaxis()                 # el mas grande arriba
+    ax2.barh([acortar(n) for _, n, _ in top_pub], [c for _, _, c in top_pub])
+    ax2.invert_yaxis()
     ax2.set_title("Top servers (paquetes)")
     ax2.set_xlabel("paquetes")
-
     plt.tight_layout()
     nombre = datetime.now().strftime("grafico_%Y%m%d_%H%M%S.png")
     plt.savefig(nombre, dpi=100)
@@ -199,18 +218,33 @@ def imprimir_resumen(top_pub, archivo_pcap):
         print(f"  {puerto:5} {SERVICIOS.get(puerto, '?'):9} {cuenta}")
 
     print(f"\nConexiones distintas: {len(conexiones)}")
+
+    # --- Alertas de seguridad ---
+    if sin_cifrar:
+        print("\n[!] Trafico SIN CIFRAR detectado:")
+        for (ip, servicio), cuenta in sin_cifrar.most_common():
+            print(f"    {servicio:7} con {ip}  ({cuenta} paq)  ->  {INSEGUROS[servicio]}")
+
+    escaneos = detectar_escaneos()
+    if escaneos:
+        print("\n[!] Posibles ESCANEOS de puertos:")
+        for origen, destino, cuantos in escaneos:
+            print(f"    {origen}  ->  {destino}  tocó {cuantos} puertos distintos")
+
+    if not sin_cifrar and not escaneos:
+        print("\n[ok] Sin trafico sin cifrar ni escaneos en esta captura.")
+
     print(f"\nGuardado: {archivo_pcap}  (abrilo con: wireshark {archivo_pcap})")
 
 
 def main():
     print(f"Capturando {SEGUNDOS} segundos... (Ctrl+C para cortar antes)\n")
     print("Generá trafico: abrí una web o tirá 'ping google.com' en otra terminal.\n")
-
-    # store=True: guardamos los paquetes en una lista para poder escribir el .pcap
-    paquetes = sniff(iface=INTERFAZ, prn=procesar, timeout=SEGUNDOS, store=True)
+    paquetes = sniff(iface=INTERFAZ, filter=FILTRO, prn=procesar,
+                     timeout=SEGUNDOS, store=True)
 
     archivo_pcap = guardar_pcap(paquetes)
-    top_pub = top_publicas_resueltas()   # resolvemos nombres una sola vez
+    top_pub = top_publicas_resueltas()
     imprimir_resumen(top_pub, archivo_pcap)
 
     archivo_png = hacer_grafico(top_pub)

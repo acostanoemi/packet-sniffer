@@ -18,6 +18,7 @@ Capturar tráfico de redes ajenas (la facu, el trabajo, un café, la red de un v
 - Resuelve el nombre de cada server (reverse DNS)
 - Detecta los servicios usados (HTTPS, DNS, etc.) ignorando los puertos efímeros
 - Cuenta las conexiones distintas
+- Avisa de tráfico sin cifrar (HTTP, FTP, Telnet) y de posibles escaneos de puertos
 - Guarda la captura en `.pcap` para abrir en Wireshark
 - Genera un gráfico `.png` (protocolos y top servers)
 
@@ -50,4 +51,4 @@ Cada corrida deja dos archivos en la carpeta: `captura_FECHA.pcap` y `grafico_FE
 - [x] v2: contar y analizar (por protocolo, top de IPs, conexiones)
 - [x] v3: resolver nombres de servers y limpiar los puertos efímeros
 - [x] v4: guardar a `.pcap` y generar gráfico
-- [ ] v5: ideas sueltas — filtrar por protocolo, alertar tráfico sin cifrar, detectar escaneos
+- [x] v5: alertas de seguridad — tráfico sin cifrar, detección de escaneos, filtro por protocolo

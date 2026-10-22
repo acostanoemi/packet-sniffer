@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """
-Sniffer de paquetes - v5 (vigilar)
+Sniffer de paquetes - v6 (argumentos por linea de comando)
 
-Captura el trafico de TU red, lo analiza, lo guarda y grafica, y ademas
-avisa de dos cosas de seguridad:
-  - trafico SIN CIFRAR (HTTP, FTP, Telnet...): quien te ve pasa en claro
-  - posibles ESCANEOS de puertos: una IP tocando muchos puertos distintos
+Captura el trafico de TU red, lo analiza, lo guarda y grafica, y avisa de
+trafico sin cifrar y posibles escaneos de puertos.
+
+Ahora se configura al correr, sin editar el archivo:
+    sudo python3 sniffer.py                       # 15 segundos, todo el trafico
+    sudo python3 sniffer.py -s 30                  # 30 segundos
+    sudo python3 sniffer.py -f tcp                 # solo TCP
+    sudo python3 sniffer.py -s 60 -f "port 53"     # 60 seg, solo DNS
+    sudo python3 sniffer.py --help                 # ver todas las opciones
 
 USO ETICO: corré esto SOLO en tu propia red / tu propia maquina.
 Capturar trafico de redes ajenas es ilegal.
-
-Necesita permisos de administrador:
-    sudo python3 sniffer.py
 """
 
 import os
 import socket
+import argparse
 from collections import Counter, defaultdict
 from datetime import datetime
 
@@ -28,13 +31,6 @@ from scapy.all import sniff, wrpcap, IP, TCP, UDP, ICMP
 
 socket.setdefaulttimeout(1)
 
-# --- Config: editá estos valores ---
-SEGUNDOS = 15            # cuanto tiempo capturar. Cortás antes con Ctrl+C
-INTERFAZ = None          # None = la placa por defecto. Ejemplos: "wlan0", "eth0"
-FILTRO = None            # None = todo. Ejemplos: "tcp", "udp", "port 53", "not port 443"
-PUERTOS_ESCANEO = 15     # cuantos puertos distintos entre dos IPs = sospechoso
-# ------------------------------------
-
 SERVICIOS = {
     20: "FTP", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP",
     53: "DNS", 80: "HTTP", 110: "POP3", 123: "NTP", 143: "IMAP",
@@ -42,7 +38,6 @@ SERVICIOS = {
     995: "POP3S", 3389: "RDP", 8080: "HTTP-alt",
 }
 
-# Servicios que viajan SIN cifrar. Su version cifrada esta al lado.
 INSEGUROS = {
     "HTTP": "usá HTTPS",
     "FTP": "usá SFTP/FTPS",
@@ -59,8 +54,24 @@ ips_privadas = Counter()
 ips_publicas = Counter()
 servicios_usados = Counter()
 conexiones = set()
-sin_cifrar = Counter()                  # (ip_server, servicio) -> paquetes
-puertos_por_par = defaultdict(set)      # (origen, destino) -> set de puertos tocados
+sin_cifrar = Counter()
+puertos_por_par = defaultdict(set)
+
+
+def parsear_args():
+    """Define y lee las opciones de la linea de comando."""
+    p = argparse.ArgumentParser(
+        description="Sniffer de paquetes educativo: captura, analiza y vigila tu red."
+    )
+    p.add_argument("-s", "--segundos", type=int, default=15,
+                   help="cuantos segundos capturar (default: 15)")
+    p.add_argument("-i", "--interfaz", default=None,
+                   help="placa de red, ej: wlan0 (default: la del sistema)")
+    p.add_argument("-f", "--filtro", default=None,
+                   help="filtro BPF, ej: 'tcp', 'port 53', 'not port 443'")
+    p.add_argument("--escaneo", type=int, default=15,
+                   help="puertos distintos entre dos IPs para alertar escaneo (default: 15)")
+    return p.parse_args()
 
 
 def es_privada(ip):
@@ -72,7 +83,6 @@ def es_privada(ip):
 
 
 def puerto_de_servicio(sport, dport):
-    """Devuelve el puerto del SERVICIO (el bajo/conocido), o None."""
     for p in (sport, dport):
         if p in SERVICIOS:
             return p
@@ -116,8 +126,6 @@ def procesar(paquete):
     if sport is None:
         return
 
-    # Para detectar escaneos: anotamos que puertos toca cada par de IPs.
-    # Un escaneo = una IP golpeando MUCHOS puertos distintos de otra.
     puertos_por_par[(origen, destino)].add(dport)
 
     servicio = puerto_de_servicio(sport, dport)
@@ -127,7 +135,6 @@ def procesar(paquete):
     servicios_usados[servicio] += 1
     conexiones.add(frozenset({(origen, sport), (destino, dport)}))
 
-    # El server es la punta que tiene el puerto de servicio
     server_ip = destino if servicio == dport else origen
     nombre = SERVICIOS.get(servicio)
     if nombre in INSEGUROS:
@@ -145,11 +152,10 @@ def top_publicas_resueltas(n=5):
     return [(ip, resolver(ip), cuenta) for ip, cuenta in ips_publicas.most_common(n)]
 
 
-def detectar_escaneos():
-    """Pares de IPs donde una toco demasiados puertos distintos de la otra."""
+def detectar_escaneos(umbral):
     sospechosos = []
     for (origen, destino), puertos in puertos_por_par.items():
-        if len(puertos) >= PUERTOS_ESCANEO:
+        if len(puertos) >= umbral:
             sospechosos.append((origen, destino, len(puertos)))
     sospechosos.sort(key=lambda x: x[2], reverse=True)
     return sospechosos
@@ -191,9 +197,9 @@ def hacer_grafico(top_pub):
     return nombre
 
 
-def imprimir_resumen(top_pub, archivo_pcap):
+def imprimir_resumen(top_pub, archivo_pcap, segundos, umbral_escaneo):
     print("\n" + "=" * 40)
-    print(f"RESUMEN ({SEGUNDOS} s)")
+    print(f"RESUMEN ({segundos} s)")
     print("=" * 40)
     print(f"\nPaquetes capturados: {total}")
 
@@ -219,13 +225,12 @@ def imprimir_resumen(top_pub, archivo_pcap):
 
     print(f"\nConexiones distintas: {len(conexiones)}")
 
-    # --- Alertas de seguridad ---
     if sin_cifrar:
         print("\n[!] Trafico SIN CIFRAR detectado:")
         for (ip, servicio), cuenta in sin_cifrar.most_common():
             print(f"    {servicio:7} con {ip}  ({cuenta} paq)  ->  {INSEGUROS[servicio]}")
 
-    escaneos = detectar_escaneos()
+    escaneos = detectar_escaneos(umbral_escaneo)
     if escaneos:
         print("\n[!] Posibles ESCANEOS de puertos:")
         for origen, destino, cuantos in escaneos:
@@ -238,14 +243,17 @@ def imprimir_resumen(top_pub, archivo_pcap):
 
 
 def main():
-    print(f"Capturando {SEGUNDOS} segundos... (Ctrl+C para cortar antes)\n")
+    args = parsear_args()
+
+    print(f"Capturando {args.segundos} segundos... (Ctrl+C para cortar antes)\n")
     print("Generá trafico: abrí una web o tirá 'ping google.com' en otra terminal.\n")
-    paquetes = sniff(iface=INTERFAZ, filter=FILTRO, prn=procesar,
-                     timeout=SEGUNDOS, store=True)
+
+    paquetes = sniff(iface=args.interfaz, filter=args.filtro, prn=procesar,
+                     timeout=args.segundos, store=True)
 
     archivo_pcap = guardar_pcap(paquetes)
     top_pub = top_publicas_resueltas()
-    imprimir_resumen(top_pub, archivo_pcap)
+    imprimir_resumen(top_pub, archivo_pcap, args.segundos, args.escaneo)
 
     archivo_png = hacer_grafico(top_pub)
     if archivo_png:

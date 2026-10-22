@@ -1,5 +1,7 @@
 # packet-sniffer
 
+![Ejemplo de salida del sniffer](ejemplo.png)
+
 Sniffer de paquetes educativo, hecho con Python y scapy. Captura el tráfico de la red, lo analiza y arma un resumen con estadísticas, guarda la captura para Wireshark y genera un gráfico.
 
 Proyecto de aprendizaje para entender cómo funciona TCP/IP viéndolo pasar de verdad.

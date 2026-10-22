@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Capturas (no subas tráfico real al repo)
+*.pcap
+*.pcapng

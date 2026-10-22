@@ -4,7 +4,7 @@ Sniffer de paquetes educativo, hecho con Python y scapy. Captura el tráfico de 
 
 Proyecto de aprendizaje para entender cómo funciona TCP/IP viéndolo pasar de verdad.
 
-## ⚠️ Uso ético y legal
+## Uso ético y legal
 
 Esta herramienta captura TODO el tráfico que pasa por la placa de red, incluido el que no es tuyo. Usala **solo en tu propia red o tu propia máquina**.
 

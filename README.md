@@ -1,3 +1,5 @@
+![tests](https://github.com/acostanoemi/packet-sniffer/actions/workflows/tests.yml/badge.svg)
+
 # packet-sniffer
 
 ![Ejemplo de salida del sniffer](ejemplo.png)

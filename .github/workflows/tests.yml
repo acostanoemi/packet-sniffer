@@ -14,6 +14,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Instalar dependencias
-        run: pip install cryptography pytest
+        run: pip install scapy matplotlib pytest
       - name: Correr los tests
         run: pytest -v
